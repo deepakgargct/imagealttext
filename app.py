@@ -5,21 +5,23 @@ import base64
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
+import os
 
 # ------------------ Config ------------------
 st.set_page_config(page_title="ALT Text Generator", layout="wide")
 st.title("🧠 ALT Text Generator using Ollama + LLaVA")
-st.markdown("Upload a CSV with image URLs. The app will use your local Ollama (`llava`) model to generate descriptive ALT text for each image.")
+st.markdown("Upload a CSV with image URLs. This app will use your local Ollama (`llava`) model to generate descriptive ALT text for each image.")
 
 MAX_RETRIES = 3
 TIMEOUT = 10
 MAX_THREADS = 6
+OLLAMA_URL = os.getenv("OLLAMA_API", "http://localhost:11434")
 
 # ------------------ Ollama Status Checker ------------------
 with st.expander("🧪 Check Ollama Server & Models", expanded=False):
     if st.button("🔍 Check Ollama Status"):
         try:
-            r = requests.get("http://localhost:11434/api/tags", timeout=5)
+            r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
             if r.status_code == 200:
                 models = [m['name'] for m in r.json().get('models', [])]
                 if models:
@@ -29,7 +31,7 @@ with st.expander("🧪 Check Ollama Server & Models", expanded=False):
             else:
                 st.error(f"⚠️ Unexpected response from Ollama: {r.status_code}")
         except requests.exceptions.RequestException as e:
-            st.error(f"❌ Could not connect to Ollama at http://localhost:11434\n\nError: {str(e)}")
+            st.error(f"❌ Could not connect to Ollama at {OLLAMA_URL}\n\nError: {str(e)}")
 
 # ------------------ Options ------------------
 check_existing_alts = st.checkbox("🕵️‍♀️ Skip images with existing ALT text (HTML scraping)", value=True)
@@ -63,12 +65,12 @@ def generate_alt_text(base64_image):
     for attempt in range(MAX_RETRIES):
         try:
             payload = {
-                "model": "llava:latest",
+                "model": "llava:latest",  # Update as needed
                 "prompt": "Please provide a functional, objective description of the provided image in no more than around 30 words so that someone who could not see it would be able to imagine it. Use an object-action-context style. Transcribe any visible text.",
                 "stream": False,
                 "images": [base64_image]
             }
-            response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=300)
+            response = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=300)
             response.raise_for_status()
             return response.json().get("response", "").strip()
         except Exception:
