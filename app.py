@@ -2,36 +2,53 @@ import streamlit as st
 import pandas as pd
 import requests
 import base64
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
-import time
 
+# ------------------ Config ------------------
 st.set_page_config(page_title="ALT Text Generator", layout="wide")
 st.title("🧠 ALT Text Generator using Ollama + LLaVA")
-st.markdown("Upload a CSV with image URLs. The app generates ALT text using your local Ollama model.")
+st.markdown("Upload a CSV with image URLs. The app will use your local Ollama (`llava`) model to generate descriptive ALT text for each image.")
 
-# --- Configuration options ---
 MAX_RETRIES = 3
 TIMEOUT = 10
 MAX_THREADS = 6
 
-check_existing_alts = st.checkbox("🕵️‍♀️ Skip images with existing ALT text from HTML page", value=True)
+# ------------------ Ollama Status Checker ------------------
+with st.expander("🧪 Check Ollama Server & Models", expanded=False):
+    if st.button("🔍 Check Ollama Status"):
+        try:
+            r = requests.get("http://localhost:11434/api/tags", timeout=5)
+            if r.status_code == 200:
+                models = [m['name'] for m in r.json().get('models', [])]
+                if models:
+                    st.success("✅ Ollama is running. Available models:\n\n" + "\n".join(models))
+                else:
+                    st.warning("⚠️ Ollama is running, but no models are installed.")
+            else:
+                st.error(f"⚠️ Unexpected response from Ollama: {r.status_code}")
+        except requests.exceptions.RequestException as e:
+            st.error(f"❌ Could not connect to Ollama at http://localhost:11434\n\nError: {str(e)}")
 
-# --- Step 1: HTML scraping to detect existing ALT text ---
+# ------------------ Options ------------------
+check_existing_alts = st.checkbox("🕵️‍♀️ Skip images with existing ALT text (HTML scraping)", value=True)
+
+# ------------------ Helpers ------------------
+
 def check_alt_tag(image_url):
     try:
-        page_url = image_url.rsplit("/", 1)[0]  # Guess parent page
+        page_url = image_url.rsplit("/", 1)[0]
         response = requests.get(page_url, timeout=TIMEOUT)
         soup = BeautifulSoup(response.text, "html.parser")
         img_tags = soup.find_all("img", src=True)
         for tag in img_tags:
             if image_url.endswith(tag["src"].split("/")[-1]) and tag.get("alt"):
-                return True  # Image has alt text
+                return True
         return False
     except Exception:
         return False
 
-# --- Step 2: Download image and convert to base64 ---
 def convert_to_base64(image_url):
     for attempt in range(MAX_RETRIES):
         try:
@@ -42,7 +59,6 @@ def convert_to_base64(image_url):
             time.sleep(1)
     return None
 
-# --- Step 3: Send to Ollama ---
 def generate_alt_text(base64_image):
     for attempt in range(MAX_RETRIES):
         try:
@@ -52,14 +68,13 @@ def generate_alt_text(base64_image):
                 "stream": False,
                 "images": [base64_image]
             }
-            response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
+            response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=300)
             response.raise_for_status()
             return response.json().get("response", "").strip()
         except Exception:
             time.sleep(1)
     return "[Error: Failed to generate ALT text after retries]"
 
-# --- Step 4: Process image URL ---
 def process_image(img_url):
     if check_existing_alts and check_alt_tag(img_url):
         return {"image_url": img_url, "alt_text": "[Skipped: Existing ALT text found]"}
@@ -72,10 +87,12 @@ def process_image(img_url):
     
     return {"image_url": img_url, "alt_text": alt_text}
 
-# --- Step 5: Upload CSV ---
+# ------------------ Upload CSV ------------------
 uploaded_file = st.file_uploader("📤 Upload CSV with Image URLs", type=["csv"])
+
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
+    
     if "image_url" not in df.columns:
         st.error("CSV must contain a column named 'image_url'")
     else:
@@ -96,18 +113,19 @@ if uploaded_file:
 
         result_df = pd.DataFrame(results)
 
-        # --- Image Previews ---
+        # ------------------ Image Previews ------------------
         st.subheader("🖼️ ALT Text Results")
         cols = st.columns(3)
+
         for i, row in result_df.iterrows():
             col = cols[i % 3]
             with col:
                 try:
-                    st.image(row["image_url"], width=200)
+                    st.image(row["image_url"], width=200, caption="Preview")
                 except Exception:
-                    st.warning("Could not load image preview")
+                    st.warning("⚠️ Could not load image preview")
                 st.markdown(f"**ALT Text:** {row['alt_text']}")
 
-        # --- CSV Download ---
+        # ------------------ Download CSV ------------------
         csv_data = result_df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download Results CSV", data=csv_data, file_name="alt_text_results.csv", mime="text/csv")
