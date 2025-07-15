@@ -3,86 +3,111 @@ import pandas as pd
 import requests
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from bs4 import BeautifulSoup
+import time
 
-st.set_page_config(page_title="ALT Text Generator with LLaVA", layout="wide")
-st.title("🧠 ALT Text Generator using Ollama + LLaVA (Parallel)")
-st.markdown("Upload a CSV with image URLs. This app will use your local Ollama (`llava`) model to generate ALT text using parallel processing.")
+st.set_page_config(page_title="ALT Text Generator", layout="wide")
+st.title("🧠 ALT Text Generator using Ollama + LLaVA")
+st.markdown("Upload a CSV with image URLs. The app generates ALT text using your local Ollama model.")
 
-# Convert image URL to base64
-def convert_to_base64(image_url):
+# --- Configuration options ---
+MAX_RETRIES = 3
+TIMEOUT = 10
+MAX_THREADS = 6
+
+check_existing_alts = st.checkbox("🕵️‍♀️ Skip images with existing ALT text from HTML page", value=True)
+
+# --- Step 1: HTML scraping to detect existing ALT text ---
+def check_alt_tag(image_url):
     try:
-        response = requests.get(image_url, timeout=10)
-        response.raise_for_status()
-        base64_image = base64.b64encode(response.content).decode("utf-8")
-        return base64_image
+        page_url = image_url.rsplit("/", 1)[0]  # Guess parent page
+        response = requests.get(page_url, timeout=TIMEOUT)
+        soup = BeautifulSoup(response.text, "html.parser")
+        img_tags = soup.find_all("img", src=True)
+        for tag in img_tags:
+            if image_url.endswith(tag["src"].split("/")[-1]) and tag.get("alt"):
+                return True  # Image has alt text
+        return False
     except Exception:
-        return None
+        return False
 
-# Send base64 image to Ollama LLaVA
+# --- Step 2: Download image and convert to base64 ---
+def convert_to_base64(image_url):
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(image_url, timeout=TIMEOUT)
+            response.raise_for_status()
+            return base64.b64encode(response.content).decode("utf-8")
+        except Exception:
+            time.sleep(1)
+    return None
+
+# --- Step 3: Send to Ollama ---
 def generate_alt_text(base64_image):
-    try:
-        payload = {
-            "model": "llava",
-            "prompt": "Please provide a functional, objective description of the provided image in no more than around 30 words so that someone who could not see it would be able to imagine it. If possible, follow an “object-action-context” framework.",
-            "stream": False,
-            "images": [base64_image]
-        }
-        response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-        return result.get("response", "").strip()
-    except Exception as e:
-        return f"[Error: {str(e)}]"
+    for attempt in range(MAX_RETRIES):
+        try:
+            payload = {
+                "model": "llava",
+                "prompt": "Please provide a functional, objective description of the provided image in no more than around 30 words so that someone who could not see it would be able to imagine it. Use an object-action-context style. Transcribe any visible text.",
+                "stream": False,
+                "images": [base64_image]
+            }
+            response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
+            response.raise_for_status()
+            return response.json().get("response", "").strip()
+        except Exception:
+            time.sleep(1)
+    return "[Error: Failed to generate ALT text after retries]"
 
-# Combined task per image
+# --- Step 4: Process image URL ---
 def process_image(img_url):
+    if check_existing_alts and check_alt_tag(img_url):
+        return {"image_url": img_url, "alt_text": "[Skipped: Existing ALT text found]"}
+    
     base64_img = convert_to_base64(img_url)
     if base64_img:
         alt_text = generate_alt_text(base64_img)
     else:
         alt_text = "[Error: Could not fetch image]"
+    
     return {"image_url": img_url, "alt_text": alt_text}
 
-# UI: Upload CSV
+# --- Step 5: Upload CSV ---
 uploaded_file = st.file_uploader("📤 Upload CSV with Image URLs", type=["csv"])
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
-
     if "image_url" not in df.columns:
-        st.error("CSV must have a column named 'image_url'")
+        st.error("CSV must contain a column named 'image_url'")
     else:
         urls = df["image_url"].dropna().unique().tolist()
-        st.info(f"Found {len(urls)} image URLs. Starting parallel processing...")
+        st.info(f"Processing {len(urls)} images using up to {MAX_THREADS} threads...")
+
         results = []
+        progress = st.progress(0, text="🔄 Starting...")
 
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-
-        max_threads = min(6, len(urls))  # Use up to 6 threads
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
             future_to_url = {executor.submit(process_image, url): url for url in urls}
-
             for i, future in enumerate(as_completed(future_to_url)):
                 result = future.result()
                 results.append(result)
-                progress_bar.progress((i + 1) / len(urls))
-                progress_text.text(f"Processed {i + 1} / {len(urls)}")
+                progress.progress((i + 1) / len(urls), text=f"Processed {i + 1}/{len(urls)}")
 
-        progress_bar.empty()
-        progress_text.empty()
+        progress.empty()
 
         result_df = pd.DataFrame(results)
 
-        # UI: Display Results with Previews
+        # --- Image Previews ---
         st.subheader("🖼️ ALT Text Results")
         cols = st.columns(3)
-
         for i, row in result_df.iterrows():
             col = cols[i % 3]
             with col:
-                st.image(row["image_url"], width=200, caption="Preview")
-                st.markdown(f"**ALT Text:** {row['alt_text']}", unsafe_allow_html=True)
+                try:
+                    st.image(row["image_url"], width=200)
+                except Exception:
+                    st.warning("Could not load image preview")
+                st.markdown(f"**ALT Text:** {row['alt_text']}")
 
-        # UI: Download CSV
+        # --- CSV Download ---
         csv_data = result_df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download Results CSV", data=csv_data, file_name="alt_text_results.csv", mime="text/csv")
