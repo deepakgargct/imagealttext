@@ -63,7 +63,7 @@ def generate_alt_text(base64_image):
     for attempt in range(MAX_RETRIES):
         try:
             payload = {
-                "model": "llava",
+                "model": "llava:latest",
                 "prompt": "Please provide a functional, objective description of the provided image in no more than around 30 words so that someone who could not see it would be able to imagine it. Use an object-action-context style. Transcribe any visible text.",
                 "stream": False,
                 "images": [base64_image]
